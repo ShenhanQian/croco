@@ -14,6 +14,12 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from typing import Union, Tuple, Iterable, List, Optional, Dict
 
+
+# padding_mode = 'zeros'
+padding_mode = 'reflect'
+# padding_mode = 'replicate'
+
+
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
 
@@ -36,6 +42,7 @@ def make_scratch(in_shape, out_shape, groups=1, expand=False):
         kernel_size=3,
         stride=1,
         padding=1,
+        padding_mode=padding_mode,
         bias=False,
         groups=groups,
     )
@@ -45,6 +52,7 @@ def make_scratch(in_shape, out_shape, groups=1, expand=False):
         kernel_size=3,
         stride=1,
         padding=1,
+        padding_mode=padding_mode,
         bias=False,
         groups=groups,
     )
@@ -54,6 +62,7 @@ def make_scratch(in_shape, out_shape, groups=1, expand=False):
         kernel_size=3,
         stride=1,
         padding=1,
+        padding_mode=padding_mode,
         bias=False,
         groups=groups,
     )
@@ -63,6 +72,7 @@ def make_scratch(in_shape, out_shape, groups=1, expand=False):
         kernel_size=3,
         stride=1,
         padding=1,
+        padding_mode=padding_mode,
         bias=False,
         groups=groups,
     )
@@ -96,6 +106,7 @@ class ResidualConvUnit_custom(nn.Module):
             kernel_size=3,
             stride=1,
             padding=1,
+            padding_mode=padding_mode,
             bias=not self.bn,
             groups=self.groups,
         )
@@ -106,6 +117,7 @@ class ResidualConvUnit_custom(nn.Module):
             kernel_size=3,
             stride=1,
             padding=1,
+            padding_mode=padding_mode,
             bias=not self.bn,
             groups=self.groups,
         )
@@ -316,16 +328,16 @@ class DPTOutputAdapter(nn.Module):
         if self.head_type == 'regression':
             # The "DPTDepthModel" head
             self.head = nn.Sequential(
-                nn.Conv2d(feature_dim, feature_dim // 2, kernel_size=3, stride=1, padding=1),
+                nn.Conv2d(feature_dim, feature_dim // 2, kernel_size=3, stride=1, padding=1, padding_mode=padding_mode),
                 Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
-                nn.Conv2d(feature_dim // 2, last_dim, kernel_size=3, stride=1, padding=1),
+                nn.Conv2d(feature_dim // 2, last_dim, kernel_size=3, stride=1, padding=1, padding_mode=padding_mode),
                 nn.ReLU(True),
                 nn.Conv2d(last_dim, self.num_channels, kernel_size=1, stride=1, padding=0)
             )
         elif self.head_type == 'semseg':
             # The "DPTSegmentationModel" head
             self.head = nn.Sequential(
-                nn.Conv2d(feature_dim, feature_dim, kernel_size=3, padding=1, bias=False),
+                nn.Conv2d(feature_dim, feature_dim, kernel_size=3, padding=1, padding_mode=padding_mode, bias=False),
                 nn.BatchNorm2d(feature_dim) if use_bn else nn.Identity(),
                 nn.ReLU(True),
                 nn.Dropout(0.1, False),
@@ -399,6 +411,7 @@ class DPTOutputAdapter(nn.Module):
                 in_channels=self.layer_dims[3],
                 out_channels=self.layer_dims[3],
                 kernel_size=3, stride=2, padding=1,
+                padding_mode=padding_mode,
             )
         )
 
