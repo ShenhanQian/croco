@@ -18,7 +18,6 @@ import math
 import json
 from collections import defaultdict, deque
 from pathlib import Path
-import numpy as np
 
 import torch
 import torch.distributed as dist
@@ -138,11 +137,11 @@ class MetricLogger(object):
             '[{0' + space_fmt + '}/{1}]',
             'eta: {eta}',
             '{meters}',
-            'time: {time}',
-            'data: {data}'
+            'time: {time}s',
+            'data: {data}s',
         ]
         if torch.cuda.is_available():
-            log_msg.append('max mem: {memory:.0f}')
+            log_msg.append('max vram: {vram:.0f}MB')
         log_msg = self.delimiter.join(log_msg)
         MB = 1024.0 * 1024.0
         for it,obj in enumerate(iterable):
@@ -157,12 +156,14 @@ class MetricLogger(object):
                         i, len_iterable, eta=eta_string,
                         meters=str(self),
                         time=str(iter_time), data=str(data_time),
-                        memory=torch.cuda.max_memory_allocated() / MB))
+                        vram=torch.cuda.max_memory_allocated() / MB),
+                    )
                 else:
                     print(log_msg.format(
                         i, len_iterable, eta=eta_string,
                         meters=str(self),
-                        time=str(iter_time), data=str(data_time)))
+                        time=str(iter_time), data=str(data_time)),
+                    )
             i += 1
             end = time.time()
             if max_iter and it >= max_iter:
@@ -220,8 +221,7 @@ def save_on_master(*args, **kwargs):
 
 
 def init_distributed_mode(args):
-    nodist = args.nodist if hasattr(args,'nodist') else False 
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ and not nodist:
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ['WORLD_SIZE'])
         args.gpu = int(os.environ['LOCAL_RANK'])
@@ -235,11 +235,10 @@ def init_distributed_mode(args):
 
     torch.cuda.set_device(args.gpu)
     args.dist_backend = 'nccl'
-    print('| distributed init (rank {}): {}, gpu {}'.format(
-        args.rank, args.dist_url, args.gpu), flush=True)
-    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+    dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                          world_size=args.world_size, rank=args.rank)
-    torch.distributed.barrier()
+    print('| process initialized. |rank {}, world_size {}, gpu {}'.format(
+        args.rank, args.world_size, args.gpu), flush=True)
     setup_for_distributed(args.rank == 0)
 
 
@@ -247,7 +246,7 @@ class NativeScalerWithGradNormCount:
     state_dict_key = "amp_scaler"
 
     def __init__(self, enabled=True):
-        self._scaler = torch.cuda.amp.GradScaler(enabled=enabled)
+        self._scaler = torch.amp.GradScaler('cuda', enabled=enabled)
 
     def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
         self._scaler.scale(loss).backward(create_graph=create_graph)
@@ -448,11 +447,18 @@ def get_parameter_groups(model, weight_decay, layer_decay=1.0, skip_list=(), no_
 def adjust_learning_rate(optimizer, epoch, args):
     """Decay the learning rate with half-cycle cosine after warmup"""
     
+    if args.cyclic_period is not None:
+        epoch = epoch % args.cyclic_period
+        epochs = args.cyclic_period
+    else:
+        epochs = args.epochs
+    
+     # linear warmup
     if epoch < args.warmup_epochs:
         lr = args.lr * epoch / args.warmup_epochs 
     else:
         lr = args.min_lr + (args.lr - args.min_lr) * 0.5 * \
-            (1. + math.cos(math.pi * (epoch - args.warmup_epochs) / (args.epochs - args.warmup_epochs)))
+            (1. + math.cos(math.pi * (epoch - args.warmup_epochs) / (epochs - args.warmup_epochs)))
             
     for param_group in optimizer.param_groups:
         if "lr_scale" in param_group:
