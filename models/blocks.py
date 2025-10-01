@@ -99,8 +99,15 @@ class Attention(nn.Module):
         # q,k,v = qkv.unbind(2)  # make torchscript happy (cannot use tensor as tuple)
                
         if self.rope is not None:
-            q = self.rope(q, xpos)
-            k = self.rope(k, xpos)
+            M = xpos.shape[1]
+            if M == N:
+                q = self.rope(q, xpos)
+                k = self.rope(k, xpos)
+            elif M < N:
+                q[:, :, :M] = self.rope(q[:, :, :M], xpos)
+                k[:, :, :M] = self.rope(k[:, :, :M], xpos)
+            else:
+                raise ValueError(f"Attention: length of xpos ({M}) should be <= length of x ({N})")
                
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
@@ -176,6 +183,7 @@ class DecoderBlock(nn.Module):
         self.norm1 = norm_layer(dim)
         self.attn = Attention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
         self.cross_attn = CrossAttention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+        # self.cross_attn = CrossAttention(dim, rope=None, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.norm3 = norm_layer(dim)
