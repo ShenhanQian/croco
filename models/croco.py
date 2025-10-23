@@ -34,6 +34,7 @@ class CroCoNet(nn.Module):
                  norm_layer=partial(nn.LayerNorm, eps=1e-6),
                  norm_im2_in_dec=True,   # whether to apply normalization of the 'memory' = (second image) in the decoder 
                  pos_embed='cosine',     # positional embedding (either cosine or RoPE100)
+                 rope_for_dec_ca=True,   # whether to use RoPE in cross-attention of the decoder (only if pos_embed is RoPE)
                 ):
                 
         super(CroCoNet, self).__init__()
@@ -62,6 +63,7 @@ class CroCoNet(nn.Module):
             self.rope = RoPE2D(freq=freq)
         else:
             raise NotImplementedError('Unknown pos_embed '+pos_embed)
+        self.rope_for_dec_ca = rope_for_dec_ca
 
         # transformer for the encoder 
         self.enc_depth = enc_depth
@@ -99,7 +101,7 @@ class CroCoNet(nn.Module):
         self.decoder_embed = nn.Linear(enc_embed_dim, dec_embed_dim, bias=True)
         # transformer for the decoder 
         self.dec_blocks = nn.ModuleList([
-            DecoderBlock(dec_embed_dim, dec_num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, norm_layer=norm_layer, norm_mem=norm_im2_in_dec, rope=self.rope)
+            DecoderBlock(dec_embed_dim, dec_num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, norm_layer=norm_layer, norm_mem=norm_im2_in_dec, rope=self.rope, rope_for_ca=self.rope_for_dec_ca)
             for i in range(dec_depth)])
         # final norm layer 
         self.dec_norm = norm_layer(dec_embed_dim)
