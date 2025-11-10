@@ -19,6 +19,8 @@ import torch.nn as nn
 
 from itertools import repeat
 import collections.abc
+from torch.nn.functional import scaled_dot_product_attention
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 def _ntuple(n):
@@ -109,11 +111,15 @@ class Attention(nn.Module):
             else:
                 raise ValueError(f"Attention: length of xpos ({M}) should be <= length of x ({N})")
                
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
+        # attn = (q @ k.transpose(-2, -1)) * self.scale
+        # attn = attn.softmax(dim=-1)
+        # attn = self.attn_drop(attn)
+        # x = (attn @ v).transpose(1, 2).reshape(B, N, C)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        with torch.backends.cuda.sdp_kernel(enable_flash=True):
+        # with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            x = scaled_dot_product_attention(q, k, v, scale=self.scale).transpose(1, 2).reshape(B, N, C)
+
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -163,14 +169,31 @@ class CrossAttention(nn.Module):
         v = self.projv(value).reshape(B,Nv,self.num_heads, C// self.num_heads).permute(0, 2, 1, 3)
         
         if self.rope is not None:
-            q = self.rope(q, qpos)
-            k = self.rope(k, kpos)
-            
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
+            Mq = qpos.shape[1]
+            if Mq == Nq:
+                q = self.rope(q, qpos)
+            elif Mq < Nq:
+                q[:, :, :Mq] = self.rope(q[:, :, :Mq], qpos)
+            else:
+                raise ValueError(f"Attention: length of qpos ({Mq}) should be <= length of q ({Nq})")
 
-        x = (attn @ v).transpose(1, 2).reshape(B, Nq, C)
+            Mk = kpos.shape[1]
+            if Mk == Nk:
+                k = self.rope(k, kpos)
+            elif Mk < Nk:
+                k[:, :, :Mk] = self.rope(k[:, :, :Mk], kpos)
+            else:
+                raise ValueError(f"Attention: length of kpos ({Mk}) should be <= length of k ({Nk})")
+
+        # attn = (q @ k.transpose(-2, -1)) * self.scale
+        # attn = attn.softmax(dim=-1)
+        # attn = self.attn_drop(attn)
+        # x = (attn @ v).transpose(1, 2).reshape(B, Nq, C)
+
+        with torch.backends.cuda.sdp_kernel(enable_flash=True):
+        # with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            x = scaled_dot_product_attention(q, k, v, scale=self.scale).transpose(1, 2).reshape(B, Nq, C)
+
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -178,11 +201,11 @@ class CrossAttention(nn.Module):
 class DecoderBlock(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, norm_mem=True, rope=None, rope_for_ca=True):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, norm_mem=True, rope=None):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
-        self.cross_attn = CrossAttention(dim, rope=rope if rope_for_ca else None, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+        self.cross_attn = CrossAttention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.norm3 = norm_layer(dim)
@@ -190,8 +213,15 @@ class DecoderBlock(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
         self.norm_y = norm_layer(dim) if norm_mem else nn.Identity()
 
-    def forward(self, x, y, xpos, ypos):
-        x = x + self.drop_path(self.attn(self.norm1(x), xpos))
+    def forward(self, x, y, xpos, ypos, r=None):
+        if r is not None:
+            assert x.shape == r.shape, f"x and r should have the same shape, but got {x.shape} and {r.shape}"
+            xr = torch.cat([x, r], dim=1)
+            xrpos = xpos.repeat(1,2,1)
+            xr = xr + self.drop_path(self.attn(self.norm1(xr), xrpos))
+            x = xr[:, :x.shape[1], :]
+        else:
+            x = x + self.drop_path(self.attn(self.norm1(x), xpos))
         y_ = self.norm_y(y)
         x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos))
         x = x + self.drop_path(self.mlp(self.norm3(x)))
