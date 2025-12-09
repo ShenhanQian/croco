@@ -93,7 +93,7 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope 
 
-    def forward(self, x, xpos):
+    def forward(self, x, xpos, attn_mask=None):
         B, N, C = x.shape
 
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).transpose(1,3)
@@ -103,6 +103,10 @@ class Attention(nn.Module):
         if self.rope is not None:
             M = xpos.shape[1]
             if M == N:
+                q = self.rope(q, xpos)
+                k = self.rope(k, xpos)
+            elif M*2 == N:
+                xpos = xpos.repeat(1,2,1)
                 q = self.rope(q, xpos)
                 k = self.rope(k, xpos)
             elif M < N:
@@ -118,7 +122,7 @@ class Attention(nn.Module):
 
         with torch.backends.cuda.sdp_kernel(enable_flash=True):
         # with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-            x = scaled_dot_product_attention(q, k, v, scale=self.scale).transpose(1, 2).reshape(B, N, C)
+            x = scaled_dot_product_attention(q, k, v, scale=self.scale, attn_mask=attn_mask).transpose(1, 2).reshape(B, N, C)
 
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -172,6 +176,9 @@ class CrossAttention(nn.Module):
             Mq = qpos.shape[1]
             if Mq == Nq:
                 q = self.rope(q, qpos)
+            elif Mq*2 == Nq:
+                qpos = qpos.repeat(1,2,1)
+                q = self.rope(q, qpos)
             elif Mq < Nq:
                 q[:, :, :Mq] = self.rope(q[:, :, :Mq], qpos)
             else:
@@ -179,6 +186,9 @@ class CrossAttention(nn.Module):
 
             Mk = kpos.shape[1]
             if Mk == Nk:
+                k = self.rope(k, kpos)
+            elif Mk*2 == Nk:
+                kpos = kpos.repeat(1,2,1)
                 k = self.rope(k, kpos)
             elif Mk < Nk:
                 k[:, :, :Mk] = self.rope(k[:, :, :Mk], kpos)
@@ -213,12 +223,12 @@ class DecoderBlock(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
         self.norm_y = norm_layer(dim) if norm_mem else nn.Identity()
 
-    def forward(self, x, y, xpos, ypos, r=None):
+    def forward(self, x, y, xpos, ypos, r=None, attn_mask=None):
         if r is not None:
             assert x.shape == r.shape, f"x and r should have the same shape, but got {x.shape} and {r.shape}"
             xr = torch.cat([x, r], dim=1)
             xrpos = xpos.repeat(1,2,1)
-            xr = xr + self.drop_path(self.attn(self.norm1(xr), xrpos))
+            xr = xr + self.drop_path(self.attn(self.norm1(xr), xrpos, attn_mask=attn_mask))
             x = xr[:, :x.shape[1], :]
         else:
             x = x + self.drop_path(self.attn(self.norm1(x), xpos))
